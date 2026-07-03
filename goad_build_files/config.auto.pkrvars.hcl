@@ -1,0 +1,8 @@
+proxmox_url             = "https://X.X.X.X:8006/api2/json"
+proxmox_username        = "infra_as_code@pve"
+proxmox_password        = "XXXXXXXXXX"
+proxmox_skip_tls_verify = "true"
+proxmox_node            = "tripledecker"
+proxmox_pool            = "Templates"
+proxmox_iso_storage     = "local"
+proxmox_vm_storage      = "local-zfs"

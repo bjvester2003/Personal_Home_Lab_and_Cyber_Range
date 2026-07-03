@@ -1,0 +1,183 @@
+- name: Install Winlogbeat and Sysmon (ELK forwarding)
+  hosts: windows
+  gather_facts: false
+
+  vars:
+    winlogbeat_url: "https://artifacts.elastic.co/downloads/beats/winlogbeat/winlogbeat-9.0.0-windows-x86_64.zip"
+    winlogbeat_zip_name: "winlogbeat.zip"
+    winlogbeat_extracted_name: "winlogbeat-9.0.0-windows-x86_64"
+    sysmon_url: "https://download.sysinternals.com/files/Sysmon.zip"
+    sysmon_config_url: "https://raw.githubusercontent.com/olafhartong/sysmon-modular/master/sysmonconfig.xml"
+
+  tasks:
+
+    ## ---------- Step 1: CA cert ----------
+    - name: Ensure C:\ProgramData\Elastic exists
+      ansible.windows.win_file:
+        path: 'C:\ProgramData\Elastic'
+        state: directory
+
+    - name: Copy http_ca.crt to target
+      ansible.windows.win_copy:
+        src: files/http_ca.crt
+        dest: 'C:\ProgramData\Elastic\http_ca.crt'
+
+    ## ---------- Step 2: Download & extract Winlogbeat ----------
+    - name: Download Winlogbeat zip
+      ansible.windows.win_get_url:
+        url: "{{ winlogbeat_url }}"
+        dest: 'C:\Users\vagrant\Downloads\{{ winlogbeat_zip_name }}'
+
+    - name: Check if Winlogbeat is already extracted
+      ansible.windows.win_stat:
+        path: 'C:\Program Files\Winlogbeat'
+      register: winlogbeat_dir
+
+    - name: Extract Winlogbeat zip
+      community.windows.win_unzip:
+        src: 'C:\Users\vagrant\Downloads\{{ winlogbeat_zip_name }}'
+        dest: 'C:\Program Files\'
+      when: not winlogbeat_dir.stat.exists
+
+    - name: Rename extracted folder to Winlogbeat
+      ansible.windows.win_command: >
+        cmd.exe /c rename "C:\Program Files\{{ winlogbeat_extracted_name }}" "Winlogbeat"
+      args:
+        chdir: 'C:\Program Files'
+      when: not winlogbeat_dir.stat.exists
+
+    ## ---------- Step 3: Copy winlogbeat.yml ----------
+    - name: Copy winlogbeat.yml config
+      ansible.windows.win_copy:
+        src: files/winlogbeat.yml
+        dest: 'C:\Program Files\Winlogbeat\winlogbeat.yml'
+
+    ## ---------- Step 4: Test config and output ----------
+    - name: Test Winlogbeat config
+      ansible.windows.win_command: .\winlogbeat.exe test config -c .\winlogbeat.yml -e
+      args:
+        chdir: 'C:\Program Files\Winlogbeat'
+      register: test_config
+      failed_when: false
+
+    - name: Show config test result
+      debug:
+        var: test_config.stdout_lines
+
+    - name: Test Winlogbeat output (Elasticsearch reachability)
+      ansible.windows.win_command: .\winlogbeat.exe test output -c .\winlogbeat.yml -e
+      args:
+        chdir: 'C:\Program Files\Winlogbeat'
+      register: test_output
+      failed_when: false
+
+    - name: Show output test result
+      debug:
+        var: test_output.stdout_lines
+
+    ## ---------- Step 5: Winlogbeat setup ----------
+    - name: Run winlogbeat setup
+      ansible.windows.win_command: .\winlogbeat.exe setup -e
+      args:
+        chdir: 'C:\Program Files\Winlogbeat'
+      register: wlb_setup
+      changed_when: true
+
+    ## ---------- Step 6: Install and start Winlogbeat service ----------
+    - name: Check if Winlogbeat service exists
+      ansible.windows.win_service_info:
+        name: winlogbeat
+      register: wlb_svc
+
+    - name: Run install-service-winlogbeat.ps1
+      ansible.windows.win_shell: .\install-service-winlogbeat.ps1
+      args:
+        chdir: 'C:\Program Files\Winlogbeat'
+      when: not wlb_svc.exists
+
+    - name: Start Winlogbeat service
+      ansible.windows.win_service:
+        name: winlogbeat
+        start_mode: auto
+        state: started
+
+    ## ---------- Step 8: Download & extract Sysmon ----------
+    - name: Download Sysmon zip
+      ansible.windows.win_get_url:
+        url: "{{ sysmon_url }}"
+        dest: 'C:\Users\vagrant\Downloads\Sysmon.zip'
+
+    - name: Check if Sysmon is already extracted
+      ansible.windows.win_stat:
+        path: 'C:\Tools\Sysmon\Sysmon64.exe'
+      register: sysmon_bin
+
+    - name: Extract Sysmon zip
+      community.windows.win_unzip:
+        src: 'C:\Users\vagrant\Downloads\Sysmon.zip'
+        dest: 'C:\Tools\Sysmon'
+      when: not sysmon_bin.stat.exists
+
+    ## ---------- Step 9: Download sysmon-modular config ----------
+    - name: Download sysmonconfig.xml
+      ansible.windows.win_get_url:
+        url: "{{ sysmon_config_url }}"
+        dest: 'C:\Tools\Sysmon\sysmonconfig.xml'
+
+    ## ---------- Step 10: Install Sysmon with config ----------
+    - name: Check if Sysmon64 service exists
+      ansible.windows.win_service_info:
+        name: Sysmon64
+      register: sysmon_svc
+
+    - name: Install Sysmon (accepts EULA, loads config)
+      ansible.windows.win_command: >
+        .\Sysmon64.exe -accepteula -i sysmonconfig.xml
+      args:
+        chdir: 'C:\Tools\Sysmon'
+      when: not sysmon_svc.exists
+
+    ## ---------- Step 11: Confirm Sysmon service ----------
+    - name: Confirm Sysmon64 service status
+      ansible.windows.win_service_info:
+        name: Sysmon64
+      register: sysmon_svc_check
+
+    - name: Show Sysmon service status
+      debug:
+        var: sysmon_svc_check
+
+    ## ---------- Step 12: Confirm events are being generated ----------
+    - name: Check for recent Sysmon events
+      ansible.windows.win_shell: >
+        Get-WinEvent -LogName "Microsoft-Windows-Sysmon/Operational" -MaxEvents 5 |
+        Select-Object TimeCreated, Id, Message | Format-List
+      register: sysmon_events
+      failed_when: false
+
+    - name: Show recent Sysmon events
+      debug:
+        var: sysmon_events.stdout_lines
+
+    ## ---------- Step 15: Winlogbeat pipelines/index setup ----------
+    - name: Run winlogbeat setup --pipelines --index-management
+      ansible.windows.win_command: .\winlogbeat.exe setup --pipelines --index-management
+      args:
+        chdir: 'C:\Program Files\Winlogbeat'
+      register: wlb_pipeline_setup
+      changed_when: true
+
+    ## ---------- Restart Winlogbeat to pick up sysmon logs ----------
+    - name: Restart Winlogbeat service
+      ansible.windows.win_service:
+        name: winlogbeat
+        state: restarted
+
+    - name: Final Winlogbeat service check
+      ansible.windows.win_service_info:
+        name: winlogbeat
+      register: wlb_final
+
+    - name: Show final Winlogbeat status
+      debug:
+        var: wlb_final
